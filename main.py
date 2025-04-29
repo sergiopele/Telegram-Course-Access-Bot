@@ -9,8 +9,8 @@ from telegram.ext import (
     ConversationHandler, ContextTypes, filters
 )
 from datetime import datetime
-from dotenv import load_dotenv
-load_dotenv()
+# from dotenv import load_dotenv
+# load_dotenv()
 
 # --- Load environment variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
