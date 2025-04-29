@@ -1,4 +1,6 @@
 import os
+import json
+import base64
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, ReplyKeyboardMarkup
@@ -6,29 +8,37 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ConversationHandler, ContextTypes, filters
 )
-# from dotenv import load_dotenv
 from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()
 
 # --- Load environment variables ---
-# load_dotenv()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "support@example.com")
 PRIVATE_GROUP_INVITE_LINK = os.getenv("PRIVATE_GROUP_INVITE_LINK", "https://t.me/exampleinvite")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Telegram_Bot")
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 ALLOW_MULTIPLE_USERS_PER_EMAIL = os.getenv("ALLOW_MULTIPLE_USERS_PER_EMAIL", "false").lower() == "true"
+MAX_VERIFICATION_ATTEMPTS = int(os.getenv("MAX_VERIFICATION_ATTEMPTS", "3"))
 
 # --- Validate Required Environment Variables ---
 if not BOT_TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN is missing! Please set it in your environment variables.")
+    raise RuntimeError("❌ BOT_TOKEN is missing!")
 
 if not GOOGLE_SHEET_NAME:
-    raise RuntimeError("❌ GOOGLE_SHEET_NAME is missing! Please set it in your environment variables.")
+    raise RuntimeError("❌ GOOGLE_SHEET_NAME is missing!")
 
-# --- Google Sheets Setup ---
+# --- Google Sheets Setup (Base64 decode to memory) ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("google_credentials.json", scope)
+
+credentials_b64 = os.getenv("GOOGLE_CREDENTIALS_B64")
+if not credentials_b64:
+    raise RuntimeError("❌ GOOGLE_CREDENTIALS_B64 is missing!")
+
+credentials_json = base64.b64decode(credentials_b64).decode("utf-8")
+credentials_dict = json.loads(credentials_json)
+
+creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
 client = gspread.authorize(creds)
 
 # --- Logging Setup ---
@@ -67,6 +77,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
 # --- Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["attempts"] = 0  # Reset attempts at start
     await update.message.reply_text(
         "Welcome to the Course Access Bot!\n\nPlease select an option below:",
         reply_markup=MAIN_MENU
@@ -88,12 +99,24 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CHOOSING
 
 async def verify_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check number of attempts
+    attempts = context.user_data.get("attempts", 0)
+    if attempts >= MAX_VERIFICATION_ATTEMPTS:
+        await update.message.reply_text(
+            f"❌ You have exceeded the maximum number of verification attempts.\n"
+            f"Please contact our support team at {SUPPORT_EMAIL}."
+        )
+        log_action(f"User {update.effective_user.id} exceeded max attempts.")
+        return CHOOSING
+
+    context.user_data["attempts"] = attempts + 1
+
+    # Normal verification flow
     email_input = update.message.text.strip().lower()
     user = update.effective_user
     sheet = client.open(GOOGLE_SHEET_NAME).sheet1
     raw_emails = sheet.col_values(1)
-    emails = [email.lower() for email in raw_emails]  # Convert all sheet emails to lower case
-    user_ids = sheet.col_values(2)  # Column B for Telegram User IDs
+    emails = [email.lower() for email in raw_emails]
 
     try:
         if email_input in emails:
@@ -109,16 +132,12 @@ async def verify_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     log_action(f"FAILED verification - email already used: {email_input} by user {user.id}")
                     return CHOOSING
                 else:
-                    # Append new Telegram ID to existing ones
                     updated_ids = f"{existing_telegram_ids}, {user.id}"
             else:
-                # First time use
                 updated_ids = str(user.id)
 
-            # Update the sheet with updated IDs
             sheet.update_cell(email_row, 2, updated_ids)
 
-            # Send success message to user
             await update.message.reply_text(
                 f"✅ Verification successful!\n\n"
                 f"Here is your private community invite link:\n{PRIVATE_GROUP_INVITE_LINK}"
@@ -126,7 +145,6 @@ async def verify_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             log_action(f"SUCCESS verification - email {email_input} linked to Telegram ID {user.id}")
 
-            # Notify Admin
             if ADMIN_TELEGRAM_ID:
                 admin_message = (
                     f"✅ New course access granted:\n"
@@ -167,9 +185,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 conv_handler = ConversationHandler(
-    entry_points=[
-        CommandHandler("start", start),
-    ],
+    entry_points=[CommandHandler("start", start)],
     states={
         CHOOSING: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_action)],
         VERIFY_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, verify_email)],

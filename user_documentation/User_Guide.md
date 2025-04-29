@@ -17,4 +17,4 @@ Welcome to the Course Access Bot!
 
 ## Support
 If you experience any issues:
-- Contact: **support@example.com**
+- Contact: **sergiypelework@gmail.com**
