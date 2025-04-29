@@ -3,5 +3,12 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+.env.*
+*.log
 .git
 .gitignore
+.dockerignore
+.vscode/
+.idea/
+*.md
+user_documentation/
