@@ -9,8 +9,6 @@ from telegram.ext import (
     ConversationHandler, ContextTypes, filters
 )
 from datetime import datetime
-# from dotenv import load_dotenv
-# load_dotenv()
 
 # --- Load environment variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -21,35 +19,31 @@ ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 ALLOW_MULTIPLE_USERS_PER_EMAIL = os.getenv("ALLOW_MULTIPLE_USERS_PER_EMAIL", "false").lower() == "true"
 MAX_VERIFICATION_ATTEMPTS = int(os.getenv("MAX_VERIFICATION_ATTEMPTS", "3"))
 
-# --- Validate Required Environment Variables ---
 if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN is missing!")
-
 if not GOOGLE_SHEET_NAME:
     raise RuntimeError("❌ GOOGLE_SHEET_NAME is missing!")
 
-# --- Google Sheets Setup (Base64 decode to memory) ---
+# --- Google Sheets Setup ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-
 credentials_b64 = os.getenv("GOOGLE_CREDENTIALS_B64")
 if not credentials_b64:
     raise RuntimeError("❌ GOOGLE_CREDENTIALS_B64 is missing!")
-
 credentials_json = base64.b64decode(credentials_b64).decode("utf-8")
 credentials_dict = json.loads(credentials_json)
-
 creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
 client = gspread.authorize(creds)
 
-# --- Logging Setup ---
+# --- Logging ---
 LOG_FILE = "bot_actions.log"
-
 def log_action(action: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] {action}"
+    print(log_entry)
     with open(LOG_FILE, "a") as log:
-        log.write(f"[{timestamp}] {action}\n")
+        log.write(log_entry + "\n")
 
-# --- Perform Startup Health Check ---
+# --- Health Check ---
 def check_google_sheet_connection(sheet_name: str):
     try:
         sheet = client.open(sheet_name).sheet1
@@ -65,19 +59,16 @@ def check_google_sheet_connection(sheet_name: str):
 
 check_google_sheet_connection(GOOGLE_SHEET_NAME)
 
-# --- States ---
+# --- Bot States and UI ---
 CHOOSING, VERIFY_EMAIL = range(2)
-
-# --- UI Elements ---
 MAIN_MENU = ReplyKeyboardMarkup(
     [["Verify Course Purchase"]],
     resize_keyboard=True
 )
 
 # --- Handlers ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["attempts"] = 0  # Reset attempts at start
+    context.user_data["attempts"] = 0
     await update.message.reply_text(
         "Welcome to the Course Access Bot!\n\nPlease select an option below:",
         reply_markup=MAIN_MENU
@@ -87,31 +78,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "Verify Course Purchase":
-        await update.message.reply_text(
-            "Please enter the email address you used to purchase the course:"
-        )
+        await update.message.reply_text("Please enter the email address you used to purchase the course:")
         return VERIFY_EMAIL
     else:
-        await update.message.reply_text(
-            "Please use the menu to select a valid action.",
-            reply_markup=MAIN_MENU
-        )
+        await update.message.reply_text("Please use the menu to select a valid action.", reply_markup=MAIN_MENU)
     return CHOOSING
 
 async def verify_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check number of attempts
     attempts = context.user_data.get("attempts", 0)
     if attempts >= MAX_VERIFICATION_ATTEMPTS:
         await update.message.reply_text(
-            f"❌ You have exceeded the maximum number of verification attempts.\n"
-            f"Please contact our support team at {SUPPORT_EMAIL}."
+            f"❌ You have exceeded the maximum number of verification attempts.\nPlease contact our support team at {SUPPORT_EMAIL}."
         )
         log_action(f"User {update.effective_user.id} exceeded max attempts.")
         return CHOOSING
 
     context.user_data["attempts"] = attempts + 1
-
-    # Normal verification flow
     email_input = update.message.text.strip().lower()
     user = update.effective_user
     sheet = client.open(GOOGLE_SHEET_NAME).sheet1
@@ -126,62 +108,44 @@ async def verify_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if existing_telegram_ids:
                 if not ALLOW_MULTIPLE_USERS_PER_EMAIL:
                     await update.message.reply_text(
-                        f"❌ This email has already been used to verify access.\n"
-                        f"If you believe this is a mistake, please contact our support team at {SUPPORT_EMAIL}."
+                        f"❌ This email has already been used to verify access.\nIf you believe this is a mistake, contact {SUPPORT_EMAIL}."
                     )
-                    log_action(f"FAILED verification - email already used: {email_input} by user {user.id}")
+                    log_action(f"FAILED verification - reused email: {email_input} by {user.id}")
                     return CHOOSING
-                else:
-                    updated_ids = f"{existing_telegram_ids}, {user.id}"
+                updated_ids = f"{existing_telegram_ids}, {user.id}"
             else:
                 updated_ids = str(user.id)
 
             sheet.update_cell(email_row, 2, updated_ids)
-
             await update.message.reply_text(
-                f"✅ Verification successful!\n\n"
-                f"Here is your private community invite link:\n{PRIVATE_GROUP_INVITE_LINK}"
+                f"✅ Verification successful!\n\nJoin here: {PRIVATE_GROUP_INVITE_LINK}"
             )
-
-            log_action(f"SUCCESS verification - email {email_input} linked to Telegram ID {user.id}")
+            log_action(f"SUCCESS - email {email_input} linked to {user.id}")
 
             if ADMIN_TELEGRAM_ID:
-                admin_message = (
-                    f"✅ New course access granted:\n"
-                    f"Telegram User: @{user.username if user.username else 'No username'}\n"
-                    f"Telegram ID: {user.id}\n"
-                    f"Verified Email: {email_input}"
-                )
+                admin_msg = f"✅ Access granted:\n@{user.username or 'No username'}\nID: {user.id}\nEmail: {email_input}"
                 try:
-                    await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=admin_message)
+                    await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=admin_msg)
                 except Exception as e:
-                    log_action(f"WARNING: Failed to send admin notification: {e}")
-
+                    log_action(f"WARNING - Admin notify failed: {e}")
         else:
             await update.message.reply_text(
-                f"❌ Email not found in our system.\n"
-                f"If you believe this is an error, please contact our support team at {SUPPORT_EMAIL}."
+                f"❌ Email not found.\nIf this is an error, contact {SUPPORT_EMAIL}."
             )
-            log_action(f"FAILED verification - unknown email: {email_input} by user {user.id}")
+            log_action(f"FAILED - unknown email: {email_input} by {user.id}")
 
     except Exception as e:
-        log_action(f"ERROR processing verification: {e}")
+        log_action(f"ERROR - verification exception: {e}")
         await update.message.reply_text("❌ An internal error occurred. Please try again later.")
 
-    await update.message.reply_text(
-        "Would you like to verify another email?",
-        reply_markup=MAIN_MENU
-    )
+    await update.message.reply_text("Would you like to verify another email?", reply_markup=MAIN_MENU)
     return CHOOSING
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Operation cancelled.",
-        reply_markup=MAIN_MENU
-    )
+    await update.message.reply_text("Operation cancelled.", reply_markup=MAIN_MENU)
     return CHOOSING
 
-# --- App Initialization ---
+# --- Bot Startup ---
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 conv_handler = ConversationHandler(
